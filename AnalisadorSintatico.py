@@ -1,414 +1,660 @@
 from dataclasses import dataclass
-from typing import List, Optional
-from AnalisadorLexico import Token, TokenType
-from ast_nodes import *
+from typing import List, Optional, Any
+
+try:
+    from AnalisadorLexico import AnalisadorLexico, Token, TipoToken
+except ImportError:
+    print("ERRO: Certifique-se de que AnalisadorLexico.py está no mesmo diretório!")
+    exit(1)
+
+
+# ============================================
+# CLASSES DA ÁRVORE SINTÁTICA ABSTRATA (AST)
+# ============================================
+
+@dataclass
+class NoAST:
+    linha: int
+    coluna: int
+
+
+@dataclass
+class Programa(NoAST):
+    comandos: List[NoAST]
+
+    def __str__(self):
+        return f"Programa({len(self.comandos)} comandos)"
+
+
+@dataclass
+class DeclaracaoVariavel(NoAST):
+    tipo: str
+    nome: str
+    tamanho_array: Optional[int] = None
+    valor_inicial: Optional[NoAST] = None
+
+    def __str__(self):
+        array = f"[{self.tamanho_array}]" if self.tamanho_array is not None else ""
+        init = f" = {self.valor_inicial}" if self.valor_inicial else ""
+        return f"Declaracao({self.tipo}{array} {self.nome}{init})"
+
+
+@dataclass
+class DeclaracaoFuncao(NoAST):
+    tipo_retorno: str
+    nome: str
+    parametros: List['Parametro']
+    corpo: List[NoAST]
+
+    def __str__(self):
+        params = ", ".join(str(p) for p in self.parametros)
+        return f"Funcao({self.tipo_retorno} {self.nome}({params}))"
+
+
+@dataclass
+class Parametro(NoAST):
+    tipo: str
+    nome: str
+
+    def __str__(self):
+        return f"{self.tipo} {self.nome}"
+
+
+@dataclass
+class Atribuicao(NoAST):
+    nome: str
+    expressao: NoAST
+
+    def __str__(self):
+        return f"Atribuicao({self.nome} = {self.expressao})"
+
+
+@dataclass
+class ComandoSe(NoAST):
+    condicao: NoAST
+    bloco_verdadeiro: List[NoAST]
+    bloco_falso: Optional[List[NoAST]] = None
+
+    def __str__(self):
+        senao = " senao {...}" if self.bloco_falso else ""
+        return f"Se({self.condicao}){senao}"
+
+
+@dataclass
+class ComandoEscreva(NoAST):
+    expressao: NoAST
+
+    def __str__(self):
+        return f"Escreva({self.expressao})"
+
+
+@dataclass
+class ComandoLeia(NoAST):
+    variavel: str
+
+    def __str__(self):
+        return f"Leia({self.variavel})"
+
+
+@dataclass
+class ExpressaoBinaria(NoAST):
+    esquerda: NoAST
+    operador: str
+    direita: NoAST
+
+    def __str__(self):
+        return f"({self.esquerda} {self.operador} {self.direita})"
+
+
+@dataclass
+class Literal(NoAST):
+    valor: Any
+    tipo: str
+
+    def __str__(self):
+        if self.tipo == "cadeia":
+            return f'"{self.valor}"'
+        return str(self.valor)
+
+
+@dataclass
+class Identificador(NoAST):
+    nome: str
+
+    def __str__(self):
+        return self.nome
+
+
+# ============================================
+# ERRO SINTÁTICO
+# ============================================
 
 @dataclass
 class ErroSintatico:
     mensagem: str
     linha: int
     coluna: int
-    
+    token_encontrado: Optional[str] = None
+    token_esperado: Optional[str] = None
+
     def __str__(self):
-        return f"ERRO SINTÁTICO [L{self.linha}:C{self.coluna}] {self.mensagem}"
+        msg = f"Erro sintático [linha {self.linha}, coluna {self.coluna}]: {self.mensagem}"
+        if self.token_esperado:
+            msg += f"\n  Esperado: {self.token_esperado}"
+        if self.token_encontrado:
+            msg += f"\n  Encontrado: {self.token_encontrado}"
+        return msg
+
+
+# ============================================
+# ANALISADOR SINTÁTICO
+# ============================================
 
 class AnalisadorSintatico:
     def __init__(self, tokens: List[Token]):
         self.tokens = tokens
         self.posicao = 0
-        self.token_atual = self.tokens[0] if tokens else None
         self.erros: List[ErroSintatico] = []
-    
-    def avancar(self):
-        """Avança para o próximo token"""
+
+    def token_atual(self) -> Token:
+        if self.posicao < len(self.tokens):
+            return self.tokens[self.posicao]
+        return self.tokens[-1]
+
+    def avancar(self) -> Token:
+        token = self.token_atual()
         if self.posicao < len(self.tokens) - 1:
             self.posicao += 1
-            self.token_atual = self.tokens[self.posicao]
-    
-    def verificar(self, tipo: TokenType) -> bool:
-        """Verifica se o token atual é do tipo especificado"""
-        return self.token_atual and self.token_atual.tipo == tipo
-    
-    def consumir(self, tipo: TokenType, mensagem: str = "") -> Optional[Token]:
-        """Consome um token esperado ou gera erro"""
+        return token
+
+    def verificar(self, *tipos: TipoToken) -> bool:
+        return self.token_atual().tipo in tipos
+
+    def consumir(self, tipo: TipoToken, mensagem: str) -> Optional[Token]:
         if self.verificar(tipo):
-            token = self.token_atual
-            self.avancar()
-            return token
-        else:
-            msg = mensagem or f"Esperado {tipo.value}, encontrado {self.token_atual.tipo.value if self.token_atual else 'EOF'}"
-            self.erros.append(ErroSintatico(
-                msg,
-                self.token_atual.linha if self.token_atual else 0,
-                self.token_atual.coluna if self.token_atual else 0
-            ))
-            return None
-    
-    def sincronizar(self):
-        """Sincroniza após um erro"""
+            return self.avancar()
+        token = self.token_atual()
+        self.erros.append(ErroSintatico(
+            mensagem,
+            token.linha,
+            token.coluna,
+            token_encontrado=f"{token.tipo.value} '{token.lexema}'",
+            token_esperado=tipo.value
+        ))
+        # Recuperação: avança para tentar continuar
         self.avancar()
-        while self.token_atual and self.token_atual.tipo != TokenType.EOF:
-            if self.token_atual.tipo in [TokenType.INICIO, TokenType.FIM, TokenType.SE]:
-                return
-            self.avancar()
-    
-    def analisar(self) -> Optional[Programa]:
-        """Ponto de entrada - analisa o programa completo"""
-        declaracoes = []
-        
-        # Parseia declarações de funções
-        while self.verificar(TokenType.FUNCAO):
-            decl = self.declaracao_funcao()
-            if decl:
-                declaracoes.append(decl)
-        
-        # Parseia o bloco principal (inicio ... fim), se presente
-        if self.verificar(TokenType.INICIO):
-            main_corpo = self.bloco()
-            declaracoes.extend(main_corpo)  # Adiciona os comandos do main às declarações
-        
-        # Verifica se chegou ao fim do arquivo
-        if not self.verificar(TokenType.EOF):
-            self.erros.append(ErroSintatico(
-                "Conteúdo extra após o fim do programa",
-                self.token_atual.linha if self.token_atual else 0,
-                self.token_atual.coluna if self.token_atual else 0
-            ))
-        
-        return Programa(declaracoes)
-    
-    def declaracao(self) -> Optional[No]:
-        """Declaracao ::= DeclaracaoFuncao | DeclaracaoVariavel | Comando"""
-        if self.verificar(TokenType.FUNCAO):
-            return self.declaracao_funcao()
-        
-        if self.verificar(TokenType.INTEIRO) or self.verificar(TokenType.FLUTUANTE) or \
-           self.verificar(TokenType.CADEIA) or self.verificar(TokenType.LOGICO):
-            return self.declaracao_variavel()
-        
-        return self.comando()
-    
-    def declaracao_funcao(self) -> Optional[DeclaracaoFuncao]:
-        """DeclaracaoFuncao ::= 'funcao' Tipo IDENTIFICADOR '(' [Parametros] ')' Bloco"""
-        self.consumir(TokenType.FUNCAO)
-        
-        tipo_retorno = self.tipo()
-        if not tipo_retorno:
-            return None
-        
-        nome_token = self.consumir(TokenType.IDENTIFICADOR, "Esperado nome da função")
-        if not nome_token:
-            return None
-        
-        self.consumir(TokenType.ABRE_PAREN, "Esperado '('")
-        
-        parametros = []
-        if not self.verificar(TokenType.FECHA_PAREN):
-            parametros = self.parametros()
-        
-        self.consumir(TokenType.FECHA_PAREN, "Esperado ')'")
-        
-        corpo = self.bloco()
-        
-        return DeclaracaoFuncao(tipo_retorno, nome_token.lexema, parametros, corpo)
-    
-    def parametros(self) -> List[tuple]:
-        """Parametros ::= Tipo IDENTIFICADOR { ',' Tipo IDENTIFICADOR }"""
-        params = []
-        
-        tipo = self.tipo()
-        nome = self.consumir(TokenType.IDENTIFICADOR)
-        if tipo and nome:
-            params.append((tipo, nome.lexema))
-        
-        while self.verificar(TokenType.VIRGULA):
-            self.avancar()
-            tipo = self.tipo()
-            nome = self.consumir(TokenType.IDENTIFICADOR)
-            if tipo and nome:
-                params.append((tipo, nome.lexema))
-        
-        return params
-    
-    def declaracao_variavel(self) -> Optional[DeclaracaoVariavel]:
-        """DeclaracaoVariavel ::= Tipo IDENTIFICADOR [':=' Expressao]"""
-        tipo = self.tipo()
-        if not tipo:
-            return None
-        
-        nome_token = self.consumir(TokenType.IDENTIFICADOR, "Esperado nome da variável")
-        if not nome_token:
-            return None
-        
-        valor_inicial = None
-        if self.verificar(TokenType.ATRIBUICAO):
-            self.avancar()
-            valor_inicial = self.expressao()
-        
-        return DeclaracaoVariavel(tipo, nome_token.lexema, valor_inicial)
-    
-    def tipo(self) -> Optional[str]:
-        """Tipo ::= 'inteiro' | 'flutuante' | 'cadeia' | 'logico'"""
-        if self.verificar(TokenType.INTEIRO):
-            self.avancar()
-            return "inteiro"
-        elif self.verificar(TokenType.FLUTUANTE):
-            self.avancar()
-            return "flutuante"
-        elif self.verificar(TokenType.CADEIA):
-            self.avancar()
-            return "cadeia"
-        elif self.verificar(TokenType.LOGICO):
-            self.avancar()
-            return "logico"
         return None
-    
-    def bloco(self) -> List[No]:
-        """Bloco ::= 'inicio' { Comando } 'fim'"""
-        self.consumir(TokenType.INICIO, "Esperado 'inicio'")
-        
-        comandos = []
-        max_iteracoes = 1000  # Proteção contra loop infinito
-        iteracoes = 0
-        
-        while not self.verificar(TokenType.FIM) and not self.verificar(TokenType.EOF):
-            iteracoes += 1
-            if iteracoes > max_iteracoes:
-                self.erros.append(ErroSintatico(
-                    "Loop infinito detectado no bloco",
-                    self.token_atual.linha if self.token_atual else 0,
-                    self.token_atual.coluna if self.token_atual else 0
-                ))
+
+    def analisar(self) -> Programa:
+        comandos: List[NoAST] = []
+        linha_inicio = 1
+        coluna_inicio = 1
+
+        if self.verificar(TipoToken.INICIO_BLOCO):
+            t = self.avancar()
+            linha_inicio = t.linha
+            coluna_inicio = t.coluna
+
+        while not self.verificar(TipoToken.FIM_ARQUIVO):
+            if self.verificar(TipoToken.FIM_BLOCO):
+                self.avancar()
                 break
-            
+
             cmd = self.comando()
             if cmd:
                 comandos.append(cmd)
-        
-        self.consumir(TokenType.FIM, "Esperado 'fim'")
-        
-        return comandos
-    
-    def comando(self) -> Optional[No]:
-        """Comando ::= Atribuicao | ComandoSe | ComandoEscreva | ComandoLeia | ChamadaFuncao | Retorne"""
-        if self.verificar(TokenType.SE):
+
+            # Se houve erro grave, pula até próximo comando possível
+            if len(self.erros) > 0 and self.erros[-1].linha == self.token_atual().linha:
+                while not self.verificar(
+                    TipoToken.FIM_ARQUIVO, TipoToken.FIM_BLOCO,
+                    TipoToken.TIPO_INTEIRO, TipoToken.TIPO_FLUTUANTE,
+                    TipoToken.TIPO_LOGICO, TipoToken.TIPO_CADEIA,
+                    TipoToken.IDENTIFICADOR, TipoToken.SE,
+                    TipoToken.ESCREVA, TipoToken.LEIA
+                ):
+                    if self.verificar(TipoToken.FIM_ARQUIVO):
+                        break
+                    self.avancar()
+
+        return Programa(linha=linha_inicio, coluna=coluna_inicio, comandos=comandos)
+
+    def comando(self) -> Optional[NoAST]:
+        if self.verificar(TipoToken.TIPO_INTEIRO, TipoToken.TIPO_FLUTUANTE,
+                          TipoToken.TIPO_LOGICO, TipoToken.TIPO_CADEIA):
+            return self.declaracao_variavel_ou_funcao()
+
+        if self.verificar(TipoToken.SE):
             return self.comando_se()
-        
-        if self.verificar(TokenType.ESCREVA):
+
+        if self.verificar(TipoToken.ESCREVA):
             return self.comando_escreva()
-        
-        if self.verificar(TokenType.LEIA):
+
+        if self.verificar(TipoToken.LEIA):
             return self.comando_leia()
-        
-        if self.verificar(TokenType.RETORNE):
-            return self.comando_retorne()
-        
-        if self.verificar(TokenType.IDENTIFICADOR):
-            proximo_idx = self.posicao + 1
-            if proximo_idx < len(self.tokens):
-                proximo = self.tokens[proximo_idx]
-                if proximo.tipo == TokenType.ATRIBUICAO:
-                    return self.atribuicao()
-                elif proximo.tipo == TokenType.ABRE_PAREN:
-                    return self.chamada_funcao()
-        
-        if self.verificar(TokenType.INTEIRO) or self.verificar(TokenType.FLUTUANTE) or \
-           self.verificar(TokenType.CADEIA) or self.verificar(TokenType.LOGICO):
-            return self.declaracao_variavel()
-        
-        # Se nenhum comando foi reconhecido, avança para evitar loop infinito
-        if not self.verificar(TokenType.FIM) and not self.verificar(TokenType.EOF):
-            self.erros.append(ErroSintatico(
-                f"Comando inválido: {self.token_atual.lexema}",
-                self.token_atual.linha,
-                self.token_atual.coluna
-            ))
-            self.avancar()
-        
-        return None
-    
-    def atribuicao(self) -> Optional[Atribuicao]:
-        """Atribuicao ::= IDENTIFICADOR ':=' Expressao"""
-        nome_token = self.consumir(TokenType.IDENTIFICADOR)
-        if not nome_token:
-            return None
-        
-        self.consumir(TokenType.ATRIBUICAO, "Esperado ':='")
-        
-        valor = self.expressao()
-        
-        return Atribuicao(nome_token.lexema, valor)
-    
-    def comando_se(self) -> Optional[ComandoSe]:
-        """ComandoSe ::= 'se' Expressao Bloco ['senao' Bloco]"""
-        self.consumir(TokenType.SE)
-        
-        condicao = self.expressao()
-        bloco_se = self.bloco()
-        
-        bloco_senao = None
-        if self.verificar(TokenType.SENAO):
-            self.avancar()
-            bloco_senao = self.bloco()
-        
-        return ComandoSe(condicao, bloco_se, bloco_senao)
-    
-    def comando_escreva(self) -> Optional[ComandoEscreva]:
-        """ComandoEscreva ::= 'escreva' '(' Expressao ')'"""
-        self.consumir(TokenType.ESCREVA)
-        self.consumir(TokenType.ABRE_PAREN)
-        
-        expressao = self.expressao()
-        
-        self.consumir(TokenType.FECHA_PAREN)
-        
-        return ComandoEscreva(expressao)
-    
-    def comando_leia(self) -> Optional[ComandoLeia]:
-        """ComandoLeia ::= 'leia' '(' IDENTIFICADOR ')'"""
-        self.consumir(TokenType.LEIA)
-        self.consumir(TokenType.ABRE_PAREN)
-        
-        nome_token = self.consumir(TokenType.IDENTIFICADOR, "Esperado nome da variável")
-        
-        self.consumir(TokenType.FECHA_PAREN)
-        
-        return ComandoLeia(nome_token.lexema if nome_token else "")
-    
-    def comando_retorne(self) -> Optional[Retorne]:
-        """Retorne ::= 'retorne' [Expressao]"""
-        self.consumir(TokenType.RETORNE)
-        
-        valor = None
-        if not self.verificar(TokenType.FIM):
-            valor = self.expressao()
-        
-        return Retorne(valor)
-    
-    def chamada_funcao(self) -> Optional[ChamadaFuncao]:
-        """ChamadaFuncao ::= IDENTIFICADOR '(' [Argumentos] ')'"""
-        nome_token = self.consumir(TokenType.IDENTIFICADOR)
-        if not nome_token:
-            return None
-        
-        self.consumir(TokenType.ABRE_PAREN)
-        
-        argumentos = []
-        if not self.verificar(TokenType.FECHA_PAREN):
-            argumentos.append(self.expressao())
-            while self.verificar(TokenType.VIRGULA):
-                self.avancar()
-                argumentos.append(self.expressao())
-        
-        self.consumir(TokenType.FECHA_PAREN)
-        
-        return ChamadaFuncao(nome_token.lexema, argumentos)
-    
-    def expressao(self) -> Optional[No]:
-        """Expressao ::= ExpressaoLogica"""
-        return self.expressao_logica()
-    
-    def expressao_logica(self) -> Optional[No]:
-        """ExpressaoLogica ::= ExpressaoAditiva { ('<' | '>' | '<=' | '>=' | '==' | '!=') ExpressaoAditiva }"""
-        esquerda = self.expressao_aditiva()
-        
-        while self.token_atual and self.token_atual.tipo in [
-            TokenType.MAIOR, TokenType.MENOR, TokenType.MAIOR_IGUAL, 
-            TokenType.MENOR_IGUAL, TokenType.IGUAL, TokenType.DIFERENTE
-        ]:
-            operador = self.token_atual.lexema
-            self.avancar()
-            direita = self.expressao_aditiva()
-            esquerda = ExpressaoBinaria(esquerda, operador, direita)
-        
-        return esquerda
-    
-    def expressao_aditiva(self) -> Optional[No]:
-        """ExpressaoAditiva ::= ExpressaoMultiplicativa { ('+' | '-') ExpressaoMultiplicativa }"""
-        esquerda = self.expressao_multiplicativa()
-        
-        while self.verificar(TokenType.ADICAO) or self.verificar(TokenType.SUBTRACAO):
-            operador = self.token_atual.lexema
-            self.avancar()
-            direita = self.expressao_multiplicativa()
-            esquerda = ExpressaoBinaria(esquerda, operador, direita)
-        
-        return esquerda
-    
-    def expressao_multiplicativa(self) -> Optional[No]:
-        """ExpressaoMultiplicativa ::= ExpressaoUnaria { ('*' | '/') ExpressaoUnaria }"""
-        esquerda = self.expressao_unaria()
-        
-        while self.verificar(TokenType.MULTIPLICACAO) or self.verificar(TokenType.DIVISAO):
-            operador = self.token_atual.lexema
-            self.avancar()
-            direita = self.expressao_unaria()
-            esquerda = ExpressaoBinaria(esquerda, operador, direita)
-        
-        return esquerda
-    
-    def expressao_unaria(self) -> Optional[No]:
-        """ExpressaoUnaria ::= ('+' | '-') ExpressaoUnaria | Primario"""
-        if self.verificar(TokenType.ADICAO) or self.verificar(TokenType.SUBTRACAO):
-            operador = self.token_atual.lexema
-            self.avancar()
-            operando = self.expressao_unaria()
-            return ExpressaoUnaria(operador, operando)
-        
-        return self.primario()
-    
-    def primario(self) -> Optional[No]:
-        """Primario ::= NUMERO | IDENTIFICADOR | STRING | BOOLEANO | '(' Expressao ')' | ChamadaFuncao"""
-        if self.verificar(TokenType.CONST_INTEIRO):
-            valor = int(self.token_atual.lexema)
-            self.avancar()
-            return Numero(valor)
-        
-        if self.verificar(TokenType.CONST_FLOAT):
-            valor = float(self.token_atual.lexema)
-            self.avancar()
-            return Numero(valor)
-        
-        if self.verificar(TokenType.CONST_STRING):
-            valor = self.token_atual.lexema
-            self.avancar()
-            return String(valor)
-        
-        if self.verificar(TokenType.CONST_BOOL):
-            valor = self.token_atual.lexema.lower() == 'verdadeiro'
-            self.avancar()
-            return Booleano(valor)
-        
-        if self.verificar(TokenType.IDENTIFICADOR):
-            proximo_idx = self.posicao + 1
-            if proximo_idx < len(self.tokens) and self.tokens[proximo_idx].tipo == TokenType.ABRE_PAREN:
-                return self.chamada_funcao()
-            else:
-                nome = self.token_atual.lexema
-                self.avancar()
-                return Identificador(nome)
-        
-        if self.verificar(TokenType.ABRE_PAREN):
-            self.avancar()
-            expressao = self.expressao()
-            self.consumir(TokenType.FECHA_PAREN, "Esperado ')'")
-            return expressao
-        
+
+        if self.verificar(TipoToken.IDENTIFICADOR):
+            return self.atribuicao()
+
+        # Token inesperado
+        token = self.token_atual()
         self.erros.append(ErroSintatico(
-            f"Expressão inválida: {self.token_atual.lexema if self.token_atual else 'EOF'}",
-            self.token_atual.linha if self.token_atual else 0,
-            self.token_atual.coluna if self.token_atual else 0
+            "Comando inesperado",
+            token.linha,
+            token.coluna,
+            token_encontrado=f"{token.tipo.value} '{token.lexema}'"
         ))
+        self.avancar()
         return None
-    
-    def imprimir_erros(self):
-        """Imprime todos os erros encontrados"""
-        if self.erros:
-            print("\n" + "="*70)
-            print("ERROS SINTÁTICOS")
-            print("="*70)
-            for erro in self.erros:
-                print(erro)
-            print("="*70)
+
+    def declaracao_variavel_ou_funcao(self) -> Optional[NoAST]:
+        token_tipo = self.avancar()
+        tipo = token_tipo.lexema
+        linha = token_tipo.linha
+        coluna = token_tipo.coluna
+
+        token_nome = self.consumir(TipoToken.IDENTIFICADOR, "Esperado nome após tipo")
+        if not token_nome:
+            return None
+        nome = token_nome.lexema
+
+        tamanho_array = None
+        if self.verificar(TipoToken.COLCHETE_ESQ):
+            self.avancar()
+            t_tam = self.consumir(TipoToken.INTEIRO, "Esperado tamanho do array")
+            if t_tam:
+                tamanho_array = int(t_tam.lexema)
+            self.consumir(TipoToken.COLCHETE_DIR, "Esperado ']' após tamanho")
+
+        if self.verificar(TipoToken.PARENTESE_ESQ):
+            return self.declaracao_funcao(tipo, nome, linha, coluna)
+
+        # Declaração de variável normal
+        valor_inicial = None
+        if self.verificar(TipoToken.ATRIBUICAO):
+            self.avancar()
+            valor_inicial = self.expressao()
+
+
+        return DeclaracaoVariavel(
+            linha=linha, coluna=coluna, tipo=tipo, nome=nome,
+            tamanho_array=tamanho_array, valor_inicial=valor_inicial
+        )
+
+    def declaracao_funcao(self, tipo_retorno: str, nome: str, linha: int, coluna: int) -> DeclaracaoFuncao:
+        self.consumir(TipoToken.PARENTESE_ESQ, "Esperado '(' após nome da função")
+
+        parametros = []
+        if not self.verificar(TipoToken.PARENTESE_DIR):
+            parametros = self.lista_parametros()
+
+        self.consumir(TipoToken.PARENTESE_DIR, "Esperado ')' após parâmetros")
+
+        corpo = []
+        if self.verificar(TipoToken.INICIO_BLOCO):
+            self.avancar()
+            while not self.verificar(TipoToken.FIM_BLOCO, TipoToken.FIM_ARQUIVO):
+                cmd = self.comando()
+                if cmd:
+                    corpo.append(cmd)
+            self.consumir(TipoToken.FIM_BLOCO, "Esperado 'fim' ao fechar função")
         else:
-            print("\n✓ Nenhum erro sintático encontrado")
+            cmd = self.comando()
+            if cmd:
+                corpo.append(cmd)
+
+        return DeclaracaoFuncao(
+            linha=linha, coluna=coluna,
+            tipo_retorno=tipo_retorno, nome=nome,
+            parametros=parametros, corpo=corpo
+        )
+
+    def lista_parametros(self) -> List[Parametro]:
+        params = []
+        while True:
+            if not self.verificar(TipoToken.TIPO_INTEIRO, TipoToken.TIPO_FLUTUANTE,
+                                  TipoToken.TIPO_LOGICO, TipoToken.TIPO_CADEIA):
+                break
+            token_tipo = self.avancar()
+            tipo = token_tipo.lexema
+
+            token_nome = self.consumir(TipoToken.IDENTIFICADOR, "Esperado nome do parâmetro")
+            if not token_nome:
+                break
+            nome = token_nome.lexema
+
+            params.append(Parametro(linha=token_tipo.linha, coluna=token_tipo.coluna, tipo=tipo, nome=nome))
+
+            if not self.verificar(TipoToken.VIRGULA):
+                break
+            self.avancar()
+
+        return params
+
+    def atribuicao(self) -> Optional[Atribuicao]:
+        token_nome = self.avancar()
+        linha = token_nome.linha
+        coluna = token_nome.coluna
+        nome = token_nome.lexema
+
+        self.consumir(TipoToken.ATRIBUICAO, "Esperado '=' após variável")
+        expr = self.expressao()
+        if expr is None:
+            return None
+
+        return Atribuicao(linha=linha, coluna=coluna, nome=nome, expressao=expr)
+
+    def comando_se(self) -> Optional[ComandoSe]:
+        token_se = self.avancar()
+        linha = token_se.linha
+        coluna = token_se.coluna
+
+        self.consumir(TipoToken.PARENTESE_ESQ, "Esperado '(' após 'se'")
+        cond = self.expressao()
+        if cond is None:
+            return None
+        self.consumir(TipoToken.PARENTESE_DIR, "Esperado ')' após condição")
+
+        if self.verificar(TipoToken.FACA):
+            self.avancar()
+
+        bloco_verdadeiro = []
+        if self.verificar(TipoToken.INICIO_BLOCO):
+            self.avancar()
+            while not self.verificar(TipoToken.FIM_BLOCO, TipoToken.FIM_ARQUIVO, TipoToken.SENAO):
+                cmd = self.comando()
+                if cmd:
+                    bloco_verdadeiro.append(cmd)
+            self.consumir(TipoToken.FIM_BLOCO, "Esperado 'fim' após bloco 'se'")
+        else:
+            cmd = self.comando()
+            if cmd:
+                bloco_verdadeiro.append(cmd)
+
+        bloco_falso = None
+        if self.verificar(TipoToken.SENAO):
+            self.avancar()
+            bloco_falso = []
+            if self.verificar(TipoToken.INICIO_BLOCO):
+                self.avancar()
+                while not self.verificar(TipoToken.FIM_BLOCO, TipoToken.FIM_ARQUIVO):
+                    cmd = self.comando()
+                    if cmd:
+                        bloco_falso.append(cmd)
+                self.consumir(TipoToken.FIM_BLOCO, "Esperado 'fim' após bloco 'senao'")
+            else:
+                cmd = self.comando()
+                if cmd:
+                    bloco_falso.append(cmd)
+
+        return ComandoSe(linha=linha, coluna=coluna, condicao=cond,
+                         bloco_verdadeiro=bloco_verdadeiro, bloco_falso=bloco_falso)
+
+    def comando_escreva(self) -> Optional[ComandoEscreva]:
+        token = self.avancar()
+        self.consumir(TipoToken.PARENTESE_ESQ, "Esperado '(' após 'escreva'")
+        expr = self.expressao()
+        if expr is None:
+            return None
+        self.consumir(TipoToken.PARENTESE_DIR, "Esperado ')' após expressão")
+
+        return ComandoEscreva(linha=token.linha, coluna=token.coluna, expressao=expr)
+
+    def comando_leia(self) -> Optional[ComandoLeia]:
+        token = self.avancar()
+        self.consumir(TipoToken.PARENTESE_ESQ, "Esperado '(' após 'leia'")
+        token_var = self.consumir(TipoToken.IDENTIFICADOR, "Esperado variável em 'leia'")
+        var = token_var.lexema if token_var else ""
+        self.consumir(TipoToken.PARENTESE_DIR, "Esperado ')' após variável")
+
+        return ComandoLeia(linha=token.linha, coluna=token.coluna, variavel=var)
+
+    # Expressões (sem mudanças)
+    def expressao(self) -> Optional[NoAST]:
+        return self.expressao_comparacao()
+
+    def expressao_comparacao(self) -> Optional[NoAST]:
+        expr = self.expressao_aditiva()
+        while self.verificar(TipoToken.MAIOR, TipoToken.MENOR, TipoToken.MAIOR_IGUAL, TipoToken.MENOR_IGUAL):
+            op = self.avancar()
+            dir = self.expressao_aditiva()
+            if dir is None:
+                break
+            expr = ExpressaoBinaria(linha=op.linha, coluna=op.coluna, esquerda=expr, operador=op.lexema, direita=dir)
+        return expr
+
+    def expressao_aditiva(self) -> Optional[NoAST]:
+        expr = self.expressao_multiplicativa()
+        while self.verificar(TipoToken.ADICAO, TipoToken.SUBTRACAO):
+            op = self.avancar()
+            dir = self.expressao_multiplicativa()
+            if dir is None:
+                break
+            expr = ExpressaoBinaria(linha=op.linha, coluna=op.coluna, esquerda=expr, operador=op.lexema, direita=dir)
+        return expr
+
+    def expressao_multiplicativa(self) -> Optional[NoAST]:
+        expr = self.expressao_primaria()
+        while self.verificar(TipoToken.MULTIPLICACAO, TipoToken.DIVISAO):
+            op = self.avancar()
+            dir = self.expressao_primaria()
+            if dir is None:
+                break
+            expr = ExpressaoBinaria(linha=op.linha, coluna=op.coluna, esquerda=expr, operador=op.lexema, direita=dir)
+        return expr
+
+    def expressao_primaria(self) -> Optional[NoAST]:
+        token = self.token_atual()
+
+        if self.verificar(TipoToken.INTEIRO):
+            self.avancar()
+            return Literal(linha=token.linha, coluna=token.coluna, valor=int(token.lexema), tipo="inteiro")
+        if self.verificar(TipoToken.FLUTUANTE):
+            self.avancar()
+            return Literal(linha=token.linha, coluna=token.coluna, valor=float(token.lexema), tipo="flutuante")
+        if self.verificar(TipoToken.CADEIA):
+            self.avancar()
+            return Literal(linha=token.linha, coluna=token.coluna, valor=token.lexema, tipo="cadeia")
+        if self.verificar(TipoToken.BOOLEANO):
+            self.avancar()
+            val = token.lexema.lower() == "verdadeiro"
+            return Literal(linha=token.linha, coluna=token.coluna, valor=val, tipo="logico")
+        if self.verificar(TipoToken.IDENTIFICADOR):
+            self.avancar()
+            return Identificador(linha=token.linha, coluna=token.coluna, nome=token.lexema)
+        if self.verificar(TipoToken.PARENTESE_ESQ):
+            self.avancar()
+            expr = self.expressao()
+            self.consumir(TipoToken.PARENTESE_DIR, "Esperado ')' após expressão")
+            return expr
+
+        self.erros.append(ErroSintatico("Expressão inválida", token.linha, token.coluna))
+        self.avancar()
+        return None
+
+    # Métodos públicos
+    def tem_erros(self) -> bool:
+        return len(self.erros) > 0
+
+    def obter_erros(self) -> List[ErroSintatico]:  # <--- ADICIONADO!
+        return self.erros
+
+    def imprimir_erros(self):
+        if self.tem_erros():
+            print("\n=== ERROS SINTÁTICOS ENCONTRADOS ===")
+            for e in self.erros:
+                print(e)
+                print()
+        else:
+            print("\n=== ANÁLISE SINTÁTICA CONCLUÍDA SEM ERROS ===")
+
+
+# ============================================
+# IMPRESSÃO DA AST (inalterada)
+# ============================================
+
+def imprimir_ast(no: Optional[NoAST], nivel: int = 0, prefixo: str = ""):
+    if no is None:
+        return
+
+    indent = "  " * nivel
+    print(f"{indent}{prefixo}{no}")
+
+    if isinstance(no, Programa):
+        for i, c in enumerate(no.comandos):
+            imprimir_ast(c, nivel + 1, f"[{i}] ")
+
+    elif isinstance(no, DeclaracaoVariavel):
+        if no.valor_inicial:
+            imprimir_ast(no.valor_inicial, nivel + 1, "valor: ")
+
+    elif isinstance(no, DeclaracaoFuncao):
+        for i, p in enumerate(no.parametros):
+            imprimir_ast(p, nivel + 1, f"param[{i}]: ")
+        for i, c in enumerate(no.corpo):
+            imprimir_ast(c, nivel + 1, f"corpo[{i}]: ")
+
+    elif isinstance(no, Atribuicao):
+        imprimir_ast(no.expressao, nivel + 1, "expr: ")
+
+    elif isinstance(no, ComandoSe):
+        imprimir_ast(no.condicao, nivel + 1, "cond: ")
+        for i, c in enumerate(no.bloco_verdadeiro):
+            imprimir_ast(c, nivel + 1, f"entao[{i}]: ")
+        if no.bloco_falso:
+            for i, c in enumerate(no.bloco_falso):
+                imprimir_ast(c, nivel + 1, f"senao[{i}]: ")
+
+    elif isinstance(no, ComandoEscreva):
+        imprimir_ast(no.expressao, nivel + 1, "expr: ")
+
+    elif isinstance(no, ExpressaoBinaria):
+        imprimir_ast(no.esquerda, nivel + 1, "esq: ")
+        imprimir_ast(no.direita, nivel + 1, "dir: ")
+
+
+# ============================================
+# EXEMPLO DE USO
+# ============================================
+
+if __name__ == "__main__":
+    codigo_exemplo = """
+    inicio
+        // Declaração de variáveis
+        inteiro x = 10
+        flutuante y = 3.14
+        cadeia mensagem = "Olá"
+        logico ativo = verdadeiro
+        
+        // Atribuição
+        x = 20
+        y = x + 5
+        
+        // Expressões numéricas
+        inteiro resultado = (x + 5) * 2 - 10 / 2
+        
+        // Comando se com inicio/fim
+        se (x > 15) faca
+        inicio
+            escreva("X é maior que 15")
+            x = x - 5
+        fim
+        senao
+        inicio
+            escreva("X é menor ou igual a 15")
+        fim
+        
+        // Comparações lógicas - se simples sem senao
+        se (y >= 20) faca
+            escreva("Y é maior ou igual a 20")
+        
+        // Leitura e escrita
+        leia(x)
+        escreva(x * 2)
+        
+        // Declaração de função
+        inteiro soma(inteiro a, inteiro b)
+        inicio
+            inteiro res = a + b
+            escreva(res)
+        fim
+        
+        flutuante divide(flutuante x, flutuante y)
+        inicio
+            flutuante resultado = x / y
+            escreva(resultado)
+        fim
+    fim
+    """
+    
+    print("="*60)
+    print("ANÁLISE LÉXICA")
+    print("="*60)
+    
+    analisador_lexico = AnalisadorLexico(codigo_exemplo)
+    tokens = analisador_lexico.analisar()
+    
+    if analisador_lexico.tem_erros():
+        print("\n❌ ERRO: Análise léxica encontrou erros!")
+        analisador_lexico.imprimir_erros()
+        exit(1)
+    
+    print(f"✅ Análise léxica concluída: {len(tokens)} tokens encontrados")
+    
+    print("\n" + "="*60)
+    print("ANÁLISE SINTÁTICA")
+    print("="*60)
+    
+    analisador_sintatico = AnalisadorSintatico(tokens)
+    ast = analisador_sintatico.analisar()
+    
+    if analisador_sintatico.tem_erros():
+        analisador_sintatico.imprimir_erros()
+    else:
+        print("\n✅ Análise sintática concluída com sucesso!")
+        
+        print("\n" + "="*60)
+        print("ÁRVORE SINTÁTICA ABSTRATA (AST)")
+        print("="*60)
+        imprimir_ast(ast)
+    
+    print("\n" + "="*60)
+    print("ESTATÍSTICAS")
+    print("="*60)
+    print(f"Total de tokens: {len(tokens)}")
+    print(f"Erros sintáticos: {len(analisador_sintatico.obter_erros())}")
+    
+    print("\n\n" + "="*60)
+    print("TESTANDO CÓDIGO COM ERROS SINTÁTICOS")
+    print("="*60)
+    
+    codigo_com_erros = """
+    inicio
+        inteiro x = 10
+        
+        // Falta parêntese de fechamento
+        se (x > 5 faca
+            escreva("teste")
+        fim
+        
+        // Falta expressão de atribuição
+        inteiro y =
+        
+        // Erro em expressão
+        inteiro z = 10 + * 5
+    fim
+    """
+    
+    analisador_lexico2 = AnalisadorLexico(codigo_com_erros)
+    tokens2 = analisador_lexico2.analisar()
+    
+    analisador_sintatico2 = AnalisadorSintatico(tokens2)
+    ast2 = analisador_sintatico2.analisar()
+    
+    analisador_sintatico2.imprimir_erros()
+    
+    if ast2 and ast2.comandos:
+        print("\n" + "="*60)
+        print("AST PARCIAL (apesar dos erros)")
+        print("="*60)
+        imprimir_ast(ast2)
